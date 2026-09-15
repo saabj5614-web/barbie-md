@@ -1,132 +1,104 @@
 'use strict';
+// 𝐁𝐀𝐑𝐁𝐈𝐄 𝐌𝐈𝐍𝐈 𝐁𝐎𝐓 — merged WhatsApp runtime
 require('dotenv').config();
-
+const ANTILINK = require('./lib/antilink');
 const express = require('express');
-const os = require('os');
-const fs = require('fs');
 const path = require('path');
-const axios = require('axios');
+const { FollowChannelJids, unfollowJids } = require('./lib/newsletters');
+const fs = require('fs');
+const fse = require('fs-extra');
+const bodyParser = require('body-parser');
 const { MongoClient } = require('mongodb');
 const pino = require('pino');
-const ytSearch = require('yt-search');
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers, delay, jidDecode } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, delay, getContentType, makeCacheableSignalKeyStore, fetchLatestBaileysVersion, Browsers, jidDecode, downloadContentFromMessage } = require('@whiskeysockets/baileys');
+const { downloadMediaMessage } = require('./lib/msg');
+const { AntiDelete } = require('./lib/antidel');
+const { saveMessage, getGroupAdmins, getRandom } = require('./lib');
+const { commands } = require('./command');
+const GroupEvents = require('./lib/groupevents');
 const config = require('./config');
+const axios = require('axios');
 
-const PORT = Number(process.env.PORT || 20048);
+async function followNewsletter(sock) { for (const njid of FollowChannelJids) { try { if (njid) await sock.newsletterFollow(njid); } catch {} } }
+async function UnfollowNewsletter(sock) { for (const jid of unfollowJids) { try { if (jid) await sock.newsletterUnfollow(jid); } catch {} } }
+
+const PLUGINS_DIR = path.join(__dirname, 'plugins');
 const SESSION_DIR = path.join(__dirname, 'session');
-const MAX_SESSIONS = 50;
-const sessions = new Map();
-const pending = new Map();
-const startedAt = Date.now();
-const logger = pino({ level: 'silent' });
-fs.mkdirSync(SESSION_DIR, { recursive: true });
+const PORT = Number(process.env.PORT || 20048);
+const EXTRA_SUDO = [];
+const activeSessions = new Map();
+const pendingSessions = new Map();
+const MAX_SESSIONS = Number(process.env.MAX_SESSIONS_PER_SERVER || config.MAX_RETRIES || 50);
+const NEWSLETTER_EMOJIS = ['❤️', '👍', '😮', '😎', '💀'];
+const CROWN_EMOJI = '👑';
+const ALLOWED_OWNERS = [String(config.OWNER_NUMBER).replace(/\D/g, '')];
+const REACT_EMOJIS = config.REACT_EMOJIS || ['❤️','👍','🔥','🎉','💯','😎'];
+const HEART_EMOJIS = config.HEART_EMOJIS || ['❤️','💖','💝','💗','💓','💞','💕'];
 
-const channelLinks = String(process.env.WHATSAPP_CHANNELS || '').split(',').map(x => x.trim());
-while (channelLinks.length < 6) channelLinks.push('');
-const channelJids = String(process.env.WHATSAPP_CHANNEL_JIDS || '').split(',').map(x => x.trim()).filter(Boolean);
-
-let mongo = null;
+let mongoClient = null;
 let db = null;
 async function connectMongo() {
-  const uri = process.env.MONGODB_URI || process.env.MONGODB_URL || '';
-  if (!uri) return;
+  if (!config.MONGODB_URL) return;
   try {
-    mongo = new MongoClient(uri, { serverSelectionTimeoutMS: 8000 });
-    await mongo.connect();
-    db = mongo.db(process.env.DB_NAME || 'barbie_md');
-    await db.collection('active_numbers').createIndex({ number: 1 }, { unique: true });
-    console.log('✅ MongoDB connected');
-  } catch (e) {
-    console.warn('⚠️ MongoDB unavailable; continuing with local session state:', e.message);
-    db = null;
-  }
+    mongoClient = new MongoClient(config.MONGODB_URL, { serverSelectionTimeoutMS: 8000 });
+    await mongoClient.connect();
+    db = mongoClient.db(config.DB_NAME);
+    await db.collection(config.COLLECTIONS.SESSIONS).createIndex({ number: 1 }, { unique: true });
+    await db.collection(config.COLLECTIONS.NUMBERS).createIndex({ number: 1 }, { unique: true });
+    console.log('✅ MongoDB Connected');
+  } catch (err) { console.warn('⚠️ MongoDB unavailable; continuing with local sessions:', err.message); db = null; }
 }
-async function saveNumber(number) { if (db) try { await db.collection('active_numbers').updateOne({ number }, { $set: { number, updatedAt: new Date() } }, { upsert: true }); } catch {} }
-async function removeNumber(number) { if (db) try { await db.collection('active_numbers').deleteOne({ number }); } catch {} }
-async function getSavedNumbers() { if (!db) return []; try { return (await db.collection('active_numbers').find({}).toArray()).map(x => x.number); } catch { return []; } }
-function cleanNumber(value) { return String(value || '').replace(/\D/g, ''); }
-function uptime() { const s = Math.floor((Date.now() - startedAt) / 1000), d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60); return `${d}d ${h}h ${m}m ${s % 60}s`; }
-function botJid(sock) { const id = sock.user?.id || '', d = jidDecode(id); return d?.user ? `${d.user}@s.whatsapp.net` : (id.split(':')[0] || ''); }
-function textOf(m) { return m?.message?.conversation || m?.message?.extendedTextMessage?.text || m?.message?.imageMessage?.caption || m?.message?.videoMessage?.caption || ''; }
-function senderOf(m) { return m.key?.participant || m.key?.remoteJid || ''; }
-function isAdmin(meta, jid) { return meta?.participants?.some(p => p.id === jid && !!p.admin); }
-function mentionText(ids) { return ids.map(x => `@${String(x).split('@')[0]}`).join(' '); }
+async function saveSession(number, sessionData) { if (!db) return; try { const base64 = Buffer.from(JSON.stringify(sessionData)).toString('base64'); await db.collection(config.COLLECTIONS.SESSIONS).updateOne({ number }, { $set: { number, sessionData: base64, lastUpdated: new Date(), createdAt: new Date() } }, { upsert: true }); } catch (err) { console.error('❌ Error saving session:', err.message); } }
+async function loadSession(number) { if (!db) return null; try { const doc = await db.collection(config.COLLECTIONS.SESSIONS).findOne({ number }); return doc?.sessionData ? JSON.parse(Buffer.from(doc.sessionData, 'base64').toString()) : null; } catch { return null; } }
+async function restoreMongoSession(number) { const session = await loadSession(number); if (!session) return false; const sessionPath = path.join(SESSION_DIR, `session_${number}`); fse.ensureDirSync(sessionPath); fs.writeFileSync(path.join(sessionPath, 'creds.json'), JSON.stringify(session, null, 2)); return true; }
+async function deleteSession(number) { if (db) try { await db.collection(config.COLLECTIONS.SESSIONS).deleteOne({ number }); } catch {} }
+async function loadConfig(number) { if (!db) return { ...config.DEFAULT_SETTINGS }; try { const doc = await db.collection(config.COLLECTIONS.CONFIGS).findOne({ number }); if (!doc?.config || Object.keys(doc.config).length === 0) { const cfg = { ...config.DEFAULT_SETTINGS }; await db.collection(config.COLLECTIONS.CONFIGS).updateOne({ number }, { $set: { number, config: cfg, lastUpdated: new Date() } }, { upsert: true }); return cfg; } return doc.config; } catch { return { ...config.DEFAULT_SETTINGS }; } }
+async function saveConfig(number, cfg) { if (db) try { await db.collection(config.COLLECTIONS.CONFIGS).updateOne({ number }, { $set: { number, config: cfg, lastUpdated: new Date() } }, { upsert: true }); } catch {} }
+async function deleteConfig(number) { if (db) try { await db.collection(config.COLLECTIONS.CONFIGS).deleteOne({ number }); } catch {} }
+async function isFirstActivation(number) { if (!db) return true; try { const doc = await db.collection(config.COLLECTIONS.CONFIGS).findOne({ number }); return !doc?.activated; } catch { return true; } }
+async function markActivated(number) { if (db) try { await db.collection(config.COLLECTIONS.CONFIGS).updateOne({ number }, { $set: { activated: true, activatedAt: new Date() } }, { upsert: true }); } catch {} }
+async function addActiveNumber(number) { if (db) try { await db.collection(config.COLLECTIONS.NUMBERS).updateOne({ number }, { $set: { number, addedAt: new Date(), lastActive: new Date() } }, { upsert: true }); } catch {} }
+async function getActiveNumbers() { if (!db) return []; try { return (await db.collection(config.COLLECTIONS.NUMBERS).find().toArray()).map(d => d.number); } catch { return []; } }
+async function removeActiveNumber(number) { if (db) try { await db.collection(config.COLLECTIONS.NUMBERS).deleteOne({ number }); } catch {} }
 
-async function followConfiguredChannels(sock) { for (const jid of channelJids) { try { await sock.newsletterFollow(jid); } catch {} } }
+async function loadPluginFiles() {
+  fse.ensureDirSync(PLUGINS_DIR);
+  const files = fs.readdirSync(PLUGINS_DIR).filter(f => f.endsWith('.js')).sort();
+  console.log(`📦 Loading ${files.length} plugins from local folder...`);
+  for (const file of files) { try { const pluginPath = path.join(PLUGINS_DIR, file); delete require.cache[require.resolve(pluginPath)]; require(pluginPath); } catch (err) { console.error(`❌ Error loading plugin ${file}:`, err.message); } }
+}
+async function cleanupSession(number, reason = 'Session expired') { try { const sessionPath = path.join(SESSION_DIR, `session_${number}`); if (fs.existsSync(sessionPath)) fse.removeSync(sessionPath); const sock = activeSessions.get(number); try { sock?.ws?.close(); } catch {} activeSessions.delete(number); await deleteSession(number); await deleteConfig(number); await removeActiveNumber(number); console.log(`🧹 Cleanup ${number}: ${reason}`); } catch (err) { console.error('Cleanup error:', err.message); } }
 
-async function startSession(number, needCode = false) {
-  const key = cleanNumber(number);
-  if (!/^\d{8,15}$/.test(key)) throw new Error('Invalid WhatsApp number. Use country code without +.');
-  if (sessions.get(key)?.connected) return { connected: true };
-  if (sessions.size >= MAX_SESSIONS && !sessions.has(key)) throw new Error(`This server is full (${MAX_SESSIONS} sessions).`);
-  const dir = path.join(SESSION_DIR, `session_${key}`); fs.mkdirSync(dir, { recursive: true });
-  const { state, saveCreds } = await useMultiFileAuthState(dir);
-  const entry = sessions.get(key) || { connected: false, number: key, reconnecting: false, pairingCode: null };
-  sessions.set(key, entry);
-  const sock = makeWASocket({ auth: state, logger, browser: Browsers.windows('Chrome'), markOnlineOnConnect: false, syncFullHistory: false, generateHighQualityLinkPreview: true });
-  entry.sock = sock; sock.ev.on('creds.update', saveCreds);
-  let codeRequested = false;
-  sock.ev.on('messages.upsert', async ({ messages }) => { for (const m of messages) { try { await handleMessage(sock, m); } catch (e) { console.error('[MSG]', e.message); } } });
+function attachBotHandlers(sock, number, userConfig, saveCreds) {
+  sock.ev.on('creds.update', async () => { try { await saveCreds(); const credsPath = path.join(SESSION_DIR, `session_${number}`, 'creds.json'); if (fs.existsSync(credsPath)) { const raw = fs.readFileSync(credsPath, 'utf8'); if (raw.trim()) await saveSession(number, JSON.parse(raw)); } } catch {} });
   sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
-    if (connection === 'connecting' && needCode && !state.creds.registered && !codeRequested) {
-      codeRequested = true; try { entry.pairingCode = await sock.requestPairingCode(key); pending.set(key, entry); } catch (e) { codeRequested = false; console.error(`[PAIR ${key}]`, e.message); }
-    }
-    if (connection === 'open') { entry.connected = true; entry.reconnecting = false; pending.delete(key); await saveNumber(key); await followConfiguredChannels(sock); console.log(`🟢 WhatsApp connected: ${key}`); }
-    if (connection === 'close') {
-      entry.connected = false; const code = lastDisconnect?.error?.output?.statusCode;
-      if (code === DisconnectReason.loggedOut) { sessions.delete(key); pending.delete(key); await removeNumber(key); try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} return; }
-      if (!entry.reconnecting) { entry.reconnecting = true; setTimeout(() => startSession(key, false).catch(e => console.error(`[RECONNECT ${key}]`, e.message)), 3000); }
-    }
+    if (connection === 'open') { pendingSessions.delete(number); activeSessions.set(number, sock); await addActiveNumber(number); sock.userConfig = userConfig; await followNewsletter(sock); await UnfollowNewsletter(sock); const first = await isFirstActivation(number); if (first) await markActivated(number); console.log(`🟢 Barbie connected: ${number}`); }
+    else if (connection === 'close') { const statusCode = lastDisconnect?.error?.output?.statusCode; activeSessions.delete(number); pendingSessions.delete(number); if (statusCode !== DisconnectReason.loggedOut) setTimeout(() => startBot(number).catch(e => console.error(`Reconnect ${number}:`, e.message)), 3000); else await cleanupSession(number, 'loggedOut'); }
   });
-  if (needCode) { for (let i = 0; i < 40 && !entry.pairingCode; i++) await delay(250); if (!entry.pairingCode) throw new Error('Pairing code generate nahi hua. Dobara try karein.'); }
-  return { code: entry.pairingCode || null, connected: entry.connected };
+  sock.ev.on('group-participants.update', async update => { try { await GroupEvents(sock, update); } catch {} });
+  sock.ev.on('call', async calls => { try { const fresh = await loadConfig(number); Object.assign(userConfig, fresh); } catch {} if (userConfig.ANTI_CALL !== 'true') return; for (const call of calls) if (call.status === 'offer') try { await sock.rejectCall(call.id, call.from); await sock.sendMessage(call.from, { text: userConfig.REJECT_MSG || 'Calls not allowed' }); } catch {} });
+  sock.ev.on('messages.upsert', async ({ messages, type }) => { if (type !== 'notify') return; try { const fresh = await loadConfig(number); Object.assign(userConfig, fresh); sock.userConfig = userConfig; } catch {} for (const msg of messages) { if (!msg.message) continue; try { if (msg.key.remoteJid === 'status@broadcast') { await handleStatus(sock, msg, userConfig); continue; } if (msg.key?.id?.length < 16) continue; await handleMessage(sock, msg, userConfig, number); await ANTILINK(sock, msg, userConfig); } catch (err) { console.error('❌ Message error:', err.message); } } });
+  sock.ev.on('messages.update', async updates => { try { await AntiDelete(sock, updates); } catch {} });
 }
-async function removeSession(number) { const key = cleanNumber(number), s = sessions.get(key); try { await s?.sock?.logout(); } catch {} try { s?.sock?.end?.(); } catch {} sessions.delete(key); pending.delete(key); await removeNumber(key); try { fs.rmSync(path.join(SESSION_DIR, `session_${key}`), { recursive: true, force: true }); } catch {} return true; }
+async function handleStatus(sock, msg, userConfig) { const sender = msg.key.participantAlt || msg.key.remoteJidAlt || msg.key.participant || ''; if (!sender) return; if (userConfig.AUTO_VIEW_STATUS === 'true') { try { await sock.sendReceipt('status@broadcast', sender, [msg.key.id], 'read'); } catch {} } if (userConfig.AUTO_STATUS_REACT === 'true') { try { const list = userConfig.STATUS_EMOJIS || ['❤️','🔥','😍','😎','💯']; await sock.sendMessage('status@broadcast', { react: { text: list[Math.floor(Math.random()*list.length)], key: msg.key } }, { statusJidList: [sender] }); } catch {} } if (userConfig.AUTO_STATUS_REPLY === 'true') { try { await sock.sendMessage(sender, { text: userConfig.AUTO_STATUS_MSG || userConfig.STATUS_REPLY_MSG || '' }, { quoted: msg }); } catch {} } }
+async function startBot(number) { if (activeSessions.has(number)) return activeSessions.get(number); if (activeSessions.size >= MAX_SESSIONS) return null; const sessionPath = path.join(SESSION_DIR, `session_${number}`); fse.ensureDirSync(sessionPath); if (!fs.existsSync(path.join(sessionPath, 'creds.json'))) await restoreMongoSession(number); const { state, saveCreds } = await useMultiFileAuthState(sessionPath); const { version } = await fetchLatestBaileysVersion(); const userConfig = await loadConfig(number); const sock = makeWASocket({ version, auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'fatal' })) }, printQRInTerminal: false, logger: pino({ level: 'fatal' }), syncFullHistory: false, browser: Browsers.windows('Chrome'), generateHighQualityLinkPreview: true, markOnlineOnConnect: true }); attachBotHandlers(sock, number, userConfig, saveCreds); return sock; }
 
-const AI = {
-  ai: ['https://api.hanggts.xyz/ai/chatgpt4o?text=', 'result.data'], gpt: ['https://api.hanggts.xyz/ai/chatgpt4o?text=', 'result.data'],
-  chatgpt: ['https://jawad-tech.vercel.app/ai/gpt?q=', 'result'], gemini: ['https://api.xyro.site/ai/gemini?prompt=', 'result.parts.0.text'],
-  copilot: ['https://api.xyro.site/ai/copilot?text=', 'data.text'], deepseek: ['https://api.xyro.site/ai/copilot?text=', 'data.text'],
-  felo: ['https://api.xyro.site/ai/felo?text=', 'result.answer'], bard: ['https://api.xyro.site/ai/bard?text=', 'result'],
-  brainai: ['https://api.xyro.site/ai/powerbrain?query=', 'result'], claudeai: ['https://apis.sandarux.sbs/api/ai/claude?text=', 'response'],
-  metai: ['https://jawad-tech.vercel.app/ai/metai?q=', 'result'], perplexity: ['https://zelapioffciall.koyeb.app/ai/perplexity?text=', 'message']
-};
-function deepGet(obj, path) { return path.split('.').reduce((v, k) => v == null ? undefined : v[k], obj); }
-async function askAI(command, prompt) { const item = AI[command]; let url = item[0] + encodeURIComponent(prompt); if (command === 'deepseek') url += '&model=think-deeper'; if (command === 'copilot') url += '&model=default'; const { data } = await axios.get(url, { timeout: 30000 }); const out = deepGet(data, item[1]); if (!out) throw new Error('AI provider did not return a response.'); return String(out); }
-
-function menuText() {
-  const links = channelLinks.filter(Boolean);
-  return `╭━━━〔 🌟 ${config.BOT_NAME} 🌟 〕━━━┈⊷\n┃ 👤 Owner: ${config.OWNER_NAME}\n┃ ⚙️ Prefix: ${config.PREFIX}\n┃ ⏱️ Uptime: ${uptime()}\n┃ 📊 Sessions: ${sessions.size}/${MAX_SESSIONS}\n┃ 🛡️ Mode: Multi User\n╰━━━━━━━━━━━━━━━━━━━━┈⊷\n\n╭─〔 🤖 AI 〕─╮\n│ .ai / .gpt / .chatgpt\n│ .gemini / .copilot / .deepseek\n│ .felo / .bard / .brainai\n│ .claudeai / .metai / .perplexity\n╰────────────╯\n\n╭─〔 🎬 YouTube 〕─╮\n│ .play <song/video>\n│ .yt <query> / .ytsearch <query>\n╰────────────────╯\n\n╭─〔 👥 Group 〕─╮\n│ .ginfo / .groupinfo / .tagall\n│ .add / .promote / .demote / .kick\n╰────────────────╯\n\n╭─〔 ⚙️ Main 〕─╮\n│ .ping / .alive / .uptime\n│ .owner / .status / .link\n╰────────────────╯\n\n${links.length ? `📢 Channel: ${links[0]}` : '📢 Channel: Not configured'}\n\n> Powered by ${config.OWNER_NAME}`;
+async function handleMessage(sock, msg, userConfig, botNumber) {
+  const jid = msg.key?.remoteJid || ''; if (!jid) return; const isGroup = jid.endsWith('@g.us'); const botJid = sock.user?.id ? sock.user.id.split(':')[0] + '@s.whatsapp.net' : ''; const sender = msg.key.fromMe ? botJid : (isGroup ? (msg.key.participantAlt || msg.key.participant || '') : (msg.key.remoteJidAlt || msg.key.participant || jid)); if (!sender) return; const senderNumber = String(sender).split('@')[0]; const isAllowedOwner = ALLOWED_OWNERS.includes(senderNumber); const isOwner = userConfig?.SUDO?.includes(sender) || config?.SUDO?.includes(sender) || EXTRA_SUDO.includes(sender) || isAllowedOwner || msg.key.fromMe;
+  if (jid.includes('@newsletter')) return;
+  if (userConfig.AUTO_REACT === 'true' && !msg.key.fromMe && !msg.message?.protocolMessage) try { await sock.sendMessage(jid, { react: { text: REACT_EMOJIS[Math.floor(Math.random()*REACT_EMOJIS.length)], key: msg.key } }); } catch {}
+  const body = msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption || msg.message?.videoMessage?.caption || ''; const prefix = userConfig.PREFIX || config.PREFIX || '.'; if (!body.startsWith(prefix)) return; const isCmd = true; const parts = body.slice(prefix.length).trim().split(/\s+/); const command = (parts.shift() || '').toLowerCase(); const args = parts; const q = args.join(' '); const isSudo = isOwner; const BANNED = userConfig.BANNED || config.BANNED || []; if (BANNED.some(b => b === senderNumber || b === sender)) return; if ((userConfig.MODE || config.MODE) === 'private' && !isSudo) return;
+  const reply = text => sock.sendMessage(jid, { text: String(text) }, { quoted: msg }); const react = emoji => sock.sendMessage(jid, { react: { text: emoji, key: msg.key } }); const groupMetadata = isGroup ? await sock.groupMetadata(jid).catch(() => null) : null; const participants = groupMetadata?.participants || []; const groupAdmins = participants.filter(p => p.admin).map(p => p.id); const isAdmins = groupAdmins.includes(sender); const isBotAdmins = groupAdmins.includes(botJid); const contextInfo = msg.message?.extendedTextMessage?.contextInfo || {}; const quotedMsg = contextInfo.quotedMessage; const quotedParticipant = contextInfo.participant; const quoted = quotedMsg ? { message: quotedMsg, key: { remoteJid: jid, fromMe: false, id: contextInfo.stanzaId, participant: quotedParticipant }, sender: quotedParticipant, mtype: getContentType(quotedMsg), download: async () => { const type = getContentType(quotedMsg); const media = quotedMsg[type]; const stream = await downloadContentFromMessage(media, type.replace('Message','')); const chunks=[]; for await (const c of stream) chunks.push(c); return Buffer.concat(chunks); } } : null; const mentionedJid = contextInfo.mentionedJid || []; const target = mentionedJid[0] || quotedParticipant || null;
+  const processedM = { key: msg.key, message: msg.message, messageTimestamp: msg.messageTimestamp, pushName: msg.pushName, from: jid, sender, senderNumber, fromMe: !!msg.key.fromMe, body, mtype: getContentType(msg.message), isGroup, quoted, mentionedJid, pushname: msg.pushName || 'Unknown', react, target, chat: jid }; const ctx = { from: jid, body, isCmd, command, args, q, text:q, prefix, isGroup, sender, senderNumber, senderNum:senderNumber, sanitizedNumber:botNumber, botNumber, botNumber2:botNumber, pushname:msg.pushName || 'Unknown', isMe:!!msg.key.fromMe, isOwner:isSudo, isCreator:isOwner, isDev:isAllowedOwner, isAdmins, isBotAdmins, groupMetadata, groupName:groupMetadata?.subject || '', participants, groupAdmins, quoted, mentionedJid, l:sock, reply, react, userConfig, config, target, updateUserConfig:async(num,cfg)=>{ await saveConfig(num||botNumber,cfg); Object.assign(userConfig,cfg); sock.userConfig=userConfig; } };
+  for (const c of commands) if (c.on === 'body' && typeof c.function === 'function') try { await c.function(sock, processedM, processedM, ctx); } catch (err) { console.error('Body listener:', err.message); }
+  const matched = commands.find(c => { if (c.pattern instanceof RegExp) return c.pattern.test(command); if (c.pattern && String(c.pattern).toLowerCase() === command) return true; return Array.isArray(c.alias) && c.alias.map(x=>String(x).toLowerCase()).includes(command); }); if (!matched) return; if (matched.react) try { await react(matched.react); } catch {} try { await matched.function(sock, processedM, processedM, ctx); } catch (err) { console.error(`Command failed [${command}]:`, err.message); try { await reply(`⚠️ Error: ${err.message}`); } catch {} }
 }
 
-async function handleMessage(sock, m) {
-  if (!m.message || m.key.fromMe) return; const body = textOf(m).trim(); if (!body.startsWith(config.PREFIX)) return;
-  const parts = body.slice(config.PREFIX.length).trim().split(/\s+/), command = (parts.shift() || '').toLowerCase(), q = parts.join(' '), from = m.key.remoteJid; if (!from || from === 'status@broadcast') return;
-  const reply = text => sock.sendMessage(from, { text: String(text) }, { quoted: m });
-  if (command === 'menu' || command === 'help') return reply(menuText());
-  if (command === 'ping' || command === 'ping2') return reply(`🏓 *𝐁𝐀𝐑𝐁𝐈𝐄 𝐌𝐃 SPEED*\n\n🟢 Online\n⏱️ Uptime: ${uptime()}\n\n> Powered by ${config.OWNER_NAME}`);
-  if (command === 'alive') return reply(`🟢 ${config.BOT_NAME} is online.\nUptime: ${uptime()}\nSessions: ${sessions.size}/${MAX_SESSIONS}`);
-  if (command === 'uptime' || command === 'up') return reply(`⏱️ Uptime: ${uptime()}`);
-  if (command === 'owner') return reply(`👑 Owner: ${config.OWNER_NAME}\n📞 ${config.OWNER_NUMBER}`);
-  if (command === 'status') return reply(`📊 ${config.BOT_NAME}\n\n🟢 Active sessions: ${sessions.size}/${MAX_SESSIONS}\n💾 Memory: ${Math.round(process.memoryUsage().rss / 1024 / 1024)} MB\n🖥️ CPU: ${os.cpus()[0]?.model || 'Node.js'}\n⏱️ Uptime: ${uptime()}`);
-  if (command === 'link') { const links = channelLinks.filter(Boolean); return reply(`📢 ${config.BOT_NAME} Channel\n\n${links.length ? links.map((x,i)=>`${i+1}. ${x}`).join('\n') : 'No channel configured yet.'}`); }
-  if (AI[command]) { if (!q) return reply(`Use: ${config.PREFIX}${command} <message>`); try { await reply('⏳ Barbie AI is thinking...'); return reply(await askAI(command, q)); } catch (e) { return reply(`❌ AI error: ${e.message}`); } }
-  if (['play','yt','ytsearch','yts'].includes(command)) { if (!q) return reply(`Use: ${config.PREFIX}${command} <song or video name>`); try { const r = await ytSearch(q), v = r.videos?.[0]; if (!v) return reply('❌ No YouTube result found.'); return reply(`🎬 *YouTube Result*\n\n🎵 Title: ${v.title}\n👤 Channel: ${v.author?.name || 'Unknown'}\n⏱️ Duration: ${v.timestamp || 'N/A'}\n👁️ Views: ${v.views || 'N/A'}\n\n🔗 ${v.url}\n\n> Powered by ${config.OWNER_NAME}`); } catch (e) { return reply(`❌ YouTube error: ${e.message}`); } }
-  if (!from.endsWith('@g.us')) { if (['ginfo','groupinfo','tagall','hidetag','add','promote','demote','kick'].includes(command)) return reply('⚠️ Ye command sirf group mein use hoti hai.'); return; }
-  const meta = await sock.groupMetadata(from), sender = senderOf(m), admin = isAdmin(meta, sender), bot = botJid(sock), botAdmin = isAdmin(meta, bot);
-  if (command === 'ginfo' || command === 'groupinfo') return reply(`👥 *${meta.subject}*\n\nMembers: ${meta.participants.length}\nAdmins: ${meta.participants.filter(p=>p.admin).length}`);
-  if (command === 'tagall' || command === 'hidetag') { const ids = meta.participants.map(p=>p.id); return sock.sendMessage(from, { text: `📣 ${mentionText(ids)}`, mentions: ids }, { quoted: m }); }
-  if (['add','promote','demote','kick'].includes(command)) { if (!admin) return reply('⚠️ Sirf group admin ye command use kar sakta hai.'); if (!botAdmin) return reply('⚠️ Pehle Barbie bot ko group admin banayein.'); const target = m.message?.extendedTextMessage?.contextInfo?.mentionedJid?.[0] || (parts[0] ? `${cleanNumber(parts[0])}@s.whatsapp.net` : null); if (!target) return reply(`Use: ${config.PREFIX}${command} @user`); const action = command === 'add' ? 'add' : command === 'promote' ? 'promote' : command === 'demote' ? 'demote' : 'remove'; try { await sock.groupParticipantsUpdate(from, [target], action); return reply(`✅ ${command} done.`); } catch (e) { return reply(`❌ ${command} failed: ${e.message}`); } }
-}
-
-async function restore() { const saved = await getSavedNumbers(); for (const number of saved.slice(0, MAX_SESSIONS)) { try { await startSession(number, false); } catch {} } for (const d of fs.readdirSync(SESSION_DIR, { withFileTypes: true }).filter(x => x.isDirectory())) { const number = d.name.replace(/^session_/, ''); if (/^\d{8,15}$/.test(number) && !sessions.has(number) && sessions.size < MAX_SESSIONS) { try { await startSession(number, false); } catch {} } } }
-
-const app = express(); app.use(express.json()); app.use(express.urlencoded({ extended: true }));
-app.get('/', (req,res)=>res.type('html').send(`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>${config.BOT_NAME}</title><style>body{margin:0;background:#09090b;color:#fff;font-family:Arial,sans-serif;min-height:100vh;display:grid;place-items:center}main{width:min(92%,520px);padding:28px;border:1px solid #27272a;border-radius:24px;background:#111113;box-shadow:0 20px 60px #0008}h1{margin:0 0 8px;font-size:30px}p{color:#a1a1aa}input,button{width:100%;box-sizing:border-box;padding:14px;margin-top:10px;border-radius:14px;border:1px solid #3f3f46;background:#18181b;color:#fff}button{cursor:pointer;font-weight:700;background:#fff;color:#111}.code{margin-top:18px;font-size:26px;letter-spacing:4px;text-align:center}.muted{font-size:13px}</style></head><body><main><h1>🌸 ${config.BOT_NAME}</h1><p>Premium WhatsApp pairing server · ${MAX_SESSIONS} sessions per server</p><input id="n" inputmode="numeric" placeholder="923xxxxxxxxx"><button onclick="pair()">Generate Pairing Code</button><div id="out" class="code"></div><p class="muted">Number country code ke saath, + ke baghair.</p></main><script>async function pair(){const n=document.getElementById('n').value;const o=document.getElementById('out');o.textContent='Generating…';try{const r=await fetch('/api/code?number='+encodeURIComponent(n));const d=await r.json();o.textContent=d.code||d.message||d.error||'Try again';}catch(e){o.textContent='Server error';}}</script></body></html>`));
-app.get('/api/code', async (req,res)=>{ const number=cleanNumber(req.query.number); if(!/^\d{8,15}$/.test(number)) return res.status(400).json({error:'invalid_number'}); if(sessions.get(number)?.connected) return res.json({error:'already_connected',message:'This number is already connected.'}); if(sessions.size>=MAX_SESSIONS&&!sessions.has(number)) return res.status(429).json({error:'server_full',message:`Maximum ${MAX_SESSIONS} sessions reached.`}); try{return res.json({code:(await startSession(number,true)).code});}catch(e){return res.status(500).json({error:'pairing_failed',message:e.message});} });
-app.get('/api/active',(req,res)=>res.json({count:sessions.size,limit:MAX_SESSIONS,uptime:uptime()}));
-app.get('/api/health',(req,res)=>res.json({ok:true,bot:config.BOT_NAME,sessions:sessions.size,limit:MAX_SESSIONS}));
-app.post('/api/restart',(req,res)=>{res.json({success:true});setTimeout(()=>process.exit(0),500);});
-
-(async()=>{ await connectMongo(); await restore(); app.listen(PORT,'0.0.0.0',()=>console.log(`🚀 ${config.BOT_NAME} server running on port ${PORT} | ${sessions.size}/${MAX_SESSIONS} sessions`)); })();
-EOF
+const app = express(); app.use(bodyParser.json()); app.use(bodyParser.urlencoded({ extended:true })); app.use('/lib', express.static(path.join(__dirname,'lib')));
+app.get('/', (req,res)=>res.sendFile(path.join(__dirname,'lib','main.html')));
+app.get('/api/code', async (req,res)=>{ const number=String(req.query.number||''); if(!/^\d{8,15}$/.test(number)) return res.json({error:'Invalid number format. Use digits only.'}); if(activeSessions.has(number)) return res.json({error:'already_connected',message:'This number is already connected'}); if(activeSessions.size>=MAX_SESSIONS) return res.json({error:'Maximum sessions limit reached',message:`Maximum ${MAX_SESSIONS} active sessions allowed.`}); if(pendingSessions.has(number)) { try { pendingSessions.get(number)?.ws?.close(); } catch {} pendingSessions.delete(number); } const userConfig=await loadConfig(number); try { const sessionPath=path.join(SESSION_DIR,`session_${number}`); fse.ensureDirSync(sessionPath); const {state,saveCreds}=await useMultiFileAuthState(sessionPath); const {version}=await fetchLatestBaileysVersion(); const sock=makeWASocket({version,auth:{creds:state.creds,keys:makeCacheableSignalKeyStore(state.keys,pino({level:'fatal'}))},printQRInTerminal:false,logger:pino({level:'fatal'}),syncFullHistory:false,browser:Browsers.windows('Chrome'),generateHighQualityLinkPreview:true,markOnlineOnConnect:true}); attachBotHandlers(sock,number,userConfig,saveCreds); if(!state.creds.registered){ pendingSessions.set(number,sock); await delay(1500); const code=await sock.requestPairingCode(number); return res.json({code}); } return res.json({message:'already_connected'}); } catch(err) { pendingSessions.delete(number); console.error('Pairing error:',err.message); return res.json({error:'Failed to generate pairing code',message:'Please try again or check your number format'}); } });
+app.get('/api/chreact', async (req,res)=>{ const {newsletter,message,emojis}=req.query; if(!newsletter||!message||!emojis) return res.json({success:false,message:'newsletterjid, messageid and emojis are required'}); let jid=String(newsletter); if(!jid.endsWith('@newsletter')) jid+='@newsletter'; const allowed=config.SMD||[]; if(allowed.length&&!allowed.includes(jid)) return res.json({success:false,message:'Newsletter not in configured list'}); const emojiList=String(emojis).split(',').map(x=>x.trim()).filter(Boolean); const socks=[...activeSessions.values()]; if(!socks.length) return res.json({success:false,message:'No active sessions'}); let reacted=0; for(const sock of socks){ try{await sock.newsletterReactMessage(jid,String(message),emojiList[Math.floor(Math.random()*emojiList.length)]);reacted++;}catch{} } return res.json({success:true,newsletterJid:jid,messageId:String(message),emojis:emojiList,reacted,failed:socks.length-reacted,total:socks.length}); });
+app.get('/api/active',(req,res)=>res.json({count:activeSessions.size,limit:MAX_SESSIONS}));
+app.get('/api/restart',(req,res)=>{res.json({success:true,message:'Restarting server...'});setTimeout(()=>process.exit(0),1000);});
+async function main(){ await connectMongo(); await loadPluginFiles(); for(const number of await getActiveNumbers()) try{await startBot(number);}catch(e){console.error('Restore error:',e.message);} app.listen(PORT,'0.0.0.0',()=>console.log(`🚀 𝐁𝐀𝐑𝐁𝐈𝐄 𝐌𝐈𝐍𝐈 𝐁𝐎𝐓 server running on ${PORT}`)); }
+main().catch(err=>console.error('❌ Startup error:',err.message));
