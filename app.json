@@ -1,14 +1,17 @@
 {
-  "name": "barbie-md",
-  "description": "𝐁𝐀𝐑𝐁𝐈𝐄 𝐌𝐃 multi-user WhatsApp server — 50 sessions per server.",
-  "repository": "https://github.com/saabj5614-web/barbie-md",
-  "keywords": ["node", "whatsapp", "baileys", "heroku", "mongodb"],
-  "env": {
-    "MONGODB_URI": {"description": "MongoDB connection string.", "required": false},
-    "DB_NAME": {"description": "MongoDB database name.", "required": false},
-    "BOT_IMAGE_URL": {"description": "Optional Barbie DP/menu image URL.", "required": false},
-    "WHATSAPP_CHANNELS": {"description": "Comma-separated WhatsApp Channel links.", "required": false},
-    "WHATSAPP_CHANNEL_JIDS": {"description": "Comma-separated WhatsApp newsletter JIDs for auto-follow.", "required": false}
+  "name":"barbie-mini-bot",
+  "description":"𝐁𝐀𝐑𝐁𝐈𝐄 𝐌𝐈𝐍𝐈 𝐁𝐎𝐓 — multi-user WhatsApp bot with web pairing",
+  "repository":"https://github.com/saabj5614-web/barbie-md",
+  "keywords":["whatsapp","baileys","bot","barbie"],
+  "env":{
+    "OWNER_NUMBER":{"description":"Owner WhatsApp number without +","value":"923483763349"},
+    "MAX_SESSIONS_PER_SERVER":{"description":"WhatsApp sessions supported by this server","value":"50"},
+    "MONGODB_URI":{"description":"Optional MongoDB connection URI","value":""},
+    "DB_NAME":{"description":"MongoDB database name","value":"barbie_mini_bot"},
+    "WA_CHANNEL_LINKS":{"description":"Six comma-separated blank/configurable WhatsApp channel links","value":",,,,,"},
+    "WA_CHANNEL_JIDS":{"description":"Six comma-separated blank/configurable WhatsApp channel JIDs","value":",,,,,"},
+    "BOT_IMAGE_URL":{"description":"Optional Barbie DP/image URL","value":""}
   },
-  "buildpacks": [{"url": "heroku/nodejs"}]
+  "buildpacks":[{"url":"heroku/nodejs"}],
+  "formation":{"web":{"quantity":1,"size":"basic"}}
 }
