@@ -1,0 +1,14 @@
+{
+  "name": "barbie-md",
+  "description": "𝐁𝐀𝐑𝐁𝐈𝐄 𝐌𝐃 multi-user WhatsApp server — 50 sessions per server.",
+  "repository": "https://github.com/saabj5614-web/barbie-md",
+  "keywords": ["node", "whatsapp", "baileys", "heroku", "mongodb"],
+  "env": {
+    "MONGODB_URI": {"description": "MongoDB connection string.", "required": false},
+    "DB_NAME": {"description": "MongoDB database name.", "required": false},
+    "BOT_IMAGE_URL": {"description": "Optional Barbie DP/menu image URL.", "required": false},
+    "WHATSAPP_CHANNELS": {"description": "Comma-separated WhatsApp Channel links.", "required": false},
+    "WHATSAPP_CHANNEL_JIDS": {"description": "Comma-separated WhatsApp newsletter JIDs for auto-follow.", "required": false}
+  },
+  "buildpacks": [{"url": "heroku/nodejs"}]
+}
