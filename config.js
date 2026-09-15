@@ -1,14 +1,18 @@
-'use strict';
-require('dotenv').config();
-
-module.exports = {
-  BOT_NAME: process.env.BOT_NAME || '𝐁𝐀𝐑𝐁𝐈𝐄 𝐌𝐃',
-  OWNER_NAME: process.env.OWNER_NAME || '𓆩 𝛭𝑅 𝑅𝛯𝛨𝛥𝜨 𓆪',
-  OWNER_NUMBER: process.env.OWNER_NUMBER || '923483763349',
-  PREFIX: process.env.PREFIX || '.',
-  // Six intentionally empty WhatsApp Channel link slots.
-  WHATSAPP_CHANNELS: ['', '', '', '', '', ''],
-  // Six intentionally empty channel-JID slots; deployment can override them through .env.
-  WHATSAPP_CHANNEL_JIDS: ['', '', '', '', '', ''],
-  BOT_IMAGE_URL: process.env.BOT_IMAGE_URL || '',
+// 𝐁𝐀𝐑𝐁𝐈𝐄 𝐌𝐈𝐍𝐈 𝐁𝐎𝐓 — central configuration
+require("dotenv").config();
+const envList = (name, size = 0) => { const values = String(process.env[name] || "").split(",").map(v => v.trim()); return size ? Array.from({ length:size }, (_,i)=>values[i]||"") : values.filter(Boolean); };
+const ownerNumber = (process.env.OWNER_NUMBER || "923483763349").replace(/\D/g, "");
+const channelLinks = envList("WA_CHANNEL_LINKS", 6);
+const channelJids = envList("WA_CHANNEL_JIDS", 6);
+const config = {
+  MONGODB_URL: process.env.MONGODB_URI || "", DB_NAME: process.env.DB_NAME || "barbie_mini_bot",
+  COLLECTIONS: { SESSIONS:"whatsapp_sessions", NUMBERS:"active_numbers", CONFIGS:"bot_configs" },
+  BOT_NAME: process.env.BOT_NAME || "𝐁𝐀𝐑𝐁𝐈𝐄 𝐌𝐈𝐍𝐈 𝐁𝐎𝐓", OWNER_NAME: process.env.OWNER_NAME || "𓆩 𝛭𝑅 𝑅𝛯𝛨𝛥𝜨 𓆪", OWNER_NUMBER:ownerNumber, DEV:ownerNumber,
+  PREFIX:process.env.PREFIX||".", MODE:process.env.MODE||"public", VERSION:process.env.VERSION||"1.0.0", DESCRIPTION:process.env.DESCRIPTION||"*© POWERED BY 𝐁𝐀𝐑𝐁𝐈𝐄 𝐌𝐈𝐍𝐈 𝐁𝐎𝐓*", STICKER_NAME:process.env.STICKER_NAME||"𝐁𝐀𝐑𝐁𝐈𝐄 𝐌𝐈𝐍𝐈 𝐁𝐎𝐓", BOT_IMAGE:process.env.BOT_IMAGE_URL||"",
+  MAX_RETRIES:Number(process.env.MAX_SESSIONS_PER_SERVER||50), OTP_EXPIRY:300000, BANNED:[], SUDO:[ownerNumber+"@s.whatsapp.net"], SMD:channelJids.filter(Boolean), WHATSAPP_CHANNEL_LINKS:channelLinks, WHATSAPP_CHANNEL_JIDS:channelJids,
+  AUTO_VIEW_STATUS:"true", AUTO_STATUS_SEEN:"true", AUTO_STATUS_REACT:"false", AUTO_STATUS_REPLY:"false", AUTO_STATUS_REPLY_MSG:"", AUTO_RECORDING:"false", AUTO_REACT:"false", AUTO_TYPING:"false", ALWAYS_ONLINE:"false", OWNER_REACT:"false", CUSTOM_REACT:"false", HEART_REACT:"false",
+  ANTI_DELETE:"false", ANTI_DELETE_PATH:"inbox", ANTI_EDIT:"false", ANTI_EDIT_PATH:"inbox", ANTI_CALL:"false", REJECT_MSG:"*Call Rejected Automatically 📵*", ANTI_LINK:"true", ANTI_LINK_ACTION:"warn", WELCOME:"false", GOODBYE:"false", ADMIN_ACTION:"false", WELCOME_MESSAGE:"*_@user joined the group, welcome! 🎉_*", GOODBYE_MESSAGE:"*_@user has left the group, we will miss them! 👋_*",
+  CUSTOM_EMOJIS:["😊","👍","🚀","💻","🎉","🔥"], HEART_EMOJIS:["❤️","💖","💝","💗","💓","💞","💕","💟","♥️","❤️‍🔥","❤️‍🩹"], REACT_EMOJIS:["❤️","🔥","👏","😮","😢","👍","🎉","🙏","😍","😊","🥰","💕","🤩","✨","😎","🥳","🙌","💖","💗","💓","💞","💘","💝","💟","❣️","♥️","❤️‍🔥","❤️‍🩹","🧡","💛","💚","🩵","💙","💜","🩷","🤍","🤎","🖤","🩶","🌹","🌺","🌸","💐","🌷","🪷","🌻","🌼","⭐","🌟","💫","⚡","☀️","🌈","👑","💎","🏆","🎁","🎀","🧸","🦋","🕊️","🐬","🍓","🍒","🍑","🍍","🥭","🍉","🍇","🎵","🎶","🎤","🎧","🎸","🎹","🚀","🛸","💯","✔️","✅","💥","🫶","🤝","💪"],
+  DEFAULT_SETTINGS:{ AUTO_VIEW_STATUS:"true",AUTO_STATUS_SEEN:"true",AUTO_STATUS_REACT:"false",AUTO_STATUS_REPLY:"false",AUTO_STATUS_MSG:"",READ_MESSAGE:"false",AUTO_RECORDING:"false",AUTO_REACT:"false",AUTO_TYPING:"false",ALWAYS_ONLINE:"false",OWNER_REACT:"false",CUSTOM_REACT:"false",HEART_REACT:"false",CUSTOM_EMOJIS:["😊","👍","🚀","💻","🎉","🔥"],HEART_EMOJIS:["❤️","💖","💝","💗","💓","💞","💕","💟","♥️","❤️‍🔥","❤️‍🩹"],ANTI_DELETE:"false",ANTI_DELETE_PATH:"inbox",ANTI_EDIT:"false",ANTI_EDIT_PATH:"inbox",ANTI_CALL:"false",ANTI_LINK:"true",ANTI_LINK_ACTION:"warn",WELCOME:"false",GOODBYE:"false",ADMIN_ACTION:"false",WELCOME_MESSAGE:"*_@user joined the group, welcome! 🎉_*",GOODBYE_MESSAGE:"*_@user has left the group, we will miss them! 👋_*",REJECT_MSG:"*Call Rejected Automatically 📵*",VERSION:"1.0.0",OWNER_NAME:process.env.OWNER_NAME||"𓆩 𝛭𝑅 𝑅𝛯𝛨𝛥𝜨 𓆪",OWNER_NUMBER:ownerNumber,DEV:ownerNumber,DESCRIPTION:"*© POWERED BY 𝐁𝐀𝐑𝐁𝐈𝐄 𝐌𝐈𝐍𝐈 𝐁𝐎𝐓*",STICKER_NAME:"𝐁𝐀𝐑𝐁𝐈𝐄 𝐌𝐈𝐍𝐈 𝐁𝐎𝐓",MODE:process.env.MODE||"public",PREFIX:process.env.PREFIX||".",BOT_NAME:process.env.BOT_NAME||"𝐁𝐀𝐑𝐁𝐈𝐄 𝐌𝐈𝐍𝐈 𝐁𝐎𝐓",BOT_IMAGE:process.env.BOT_IMAGE_URL||"",BANNED:[],SUDO:[ownerNumber+"@s.whatsapp.net"],REACT_EMOJIS:["😂","❤️","🔥","👏","😮","😢","🤣","👍","🎉","🤔","🙏","😍","😊","🥰","💕","🤩","✨","😎","🥳","🙌"],OWNER_EMOJIS:["❤️","🔥","👑","⭐","💎"] }
 };
+module.exports=config;
